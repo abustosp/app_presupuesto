@@ -1245,7 +1245,7 @@
                     throw new Error('Por favor ingrese su API Key de Gemini en la configuración.');
                 }
                 
-                const apiUrlBase = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${apiKey}`;
+                const apiUrlBase = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
                 const systemPrompt = `Eres un experto contador y asistente de presupuesto en Argentina. Ayudas al usuario a desglosar un rubro (COGS, G. Admin o G. Comercial).
                 
@@ -1336,7 +1336,7 @@
                     throw new Error('Por favor ingrese su API Key de Gemini en la configuración.');
                 }
                 
-                const apiUrlBase = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${apiKey}`;
+                const apiUrlBase = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
                 const systemPrompt = `Eres un contador experto analizando balances. Tu tarea es extraer líneas de gastos de un texto de "Anexo de Gastos" de un Balance.
                 
@@ -1495,7 +1495,7 @@
                     throw new Error('Por favor ingrese su API Key de Gemini en la configuración.');
                 }
                 
-                const apiUrlBase = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${apiKey}`;
+                const apiUrlBase = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
                 const systemPrompt = `Eres un experto financiero en Argentina. Tu tarea es convertir un plazo de cobro o pago (en días, o con splits como "30/60 días") en una distribución porcentual por mes.
                 
@@ -2120,7 +2120,7 @@
                     throw new Error('Por favor ingrese su API Key de Gemini en la configuración.');
                 }
                 
-                const apiUrlBase = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${apiKey}`;
+                const apiUrlBase = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
                 const systemPrompt = `Eres un Analista Financiero Senior. Revisa los datos de la proyección del usuario y provee un resumen ejecutivo conciso en ESPAÑOL (máximo 150 palabras) con la siguiente estructura y tono profesional:
                 
@@ -2220,7 +2220,7 @@
                     throw new Error('Por favor ingrese su API Key de Gemini en la configuración.');
                 }
                 
-                const apiUrlBase = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${apiKey}`;
+                const apiUrlBase = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
                 
                 const prompt = `Eres un motor de simulación financiera. Tu única tarea es convertir la hipótesis del usuario en un objeto JSON con los cambios a aplicar a la configuración base.
                 
@@ -2653,24 +2653,30 @@
                     throw new Error('Por favor ingrese su API Key de Gemini en la configuración.');
                 }
                 
-                const apiUrlBase = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=${apiKey}`;
+                const apiUrlBase = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
                 const systemPrompt = `Eres un contador experto analizando balances contables argentinos. Tu tarea es extraer información clave de un balance completo en PDF.
                 
                 Instrucciones:
                 1. Busca en el ESTADO DE RESULTADOS el valor de "Ventas" o "Ingresos por Ventas" del último período.
-                2. Busca en el ANEXO II (o similar) las líneas de gastos, clasificándolas en 'admin', 'commercial' y 'cogs'.
+                2. Busca en el ANEXO II (o similar) las líneas de gastos con sus importes, clasificándolas en 'admin', 'commercial' y 'cogs'.
                 3. Excluye totales, subtotales o partidas que no sean gastos operativos (ej. 'Resultado por Tenencia', 'RECPAM', 'Intereses').
-                4. Devuelve *únicamente* un objeto JSON con esta estructura:
+                4. Suma los importes totales de cada categoría.
+                5. Devuelve *únicamente* un objeto JSON con esta estructura:
                    {
                      "ventas": 1234567.89,
+                     "totales": {
+                       "cogs": 500000.00,
+                       "admin": 200000.00,
+                       "commercial": 150000.00
+                     },
                      "gastos": {
-                       "admin": ["Sueldos Admin", "Gastos Bancarios", ...],
-                       "commercial": ["Comisiones", "Publicidad", ...],
-                       "cogs": ["Sueldos Operativos", "Materia Prima", ...]
+                       "admin": [{"nombre": "Sueldos Admin", "importe": 100000}, ...],
+                       "commercial": [{"nombre": "Comisiones", "importe": 50000}, ...],
+                       "cogs": [{"nombre": "Materia Prima", "importe": 300000}, ...]
                      }
                    }
-                5. No incluyas markdown ni otros textos fuera del JSON.`;
+                6. No incluyas markdown ni otros textos fuera del JSON.`;
 
                 const payload = {
                     contents: [{
@@ -2720,13 +2726,13 @@
                 const result = await response.json();
                 const textResult = result.candidates?.[0]?.content?.parts?.[0]?.text;
                 
-                if (!textResult) return { ventas: 0, gastos: { admin: [], commercial: [], cogs: [] } };
+                if (!textResult) return { ventas: 0, totales: { cogs: 0, admin: 0, commercial: 0 }, gastos: { admin: [], commercial: [], cogs: [] } };
 
                 try {
                     return JSON.parse(textResult);
                 } catch (e) {
                     console.error("Error al parsear JSON del balance:", e, textResult);
-                    return { ventas: 0, gastos: { admin: [], commercial: [], cogs: [] } };
+                    return { ventas: 0, totales: { cogs: 0, admin: 0, commercial: 0 }, gastos: { admin: [], commercial: [], cogs: [] } };
                 }
             };
             
@@ -2752,16 +2758,23 @@
                     const balanceData = await callGeminiForBalanceAnalysis(pdfBase64);
                     
                     // Mostrar resultados
+                    const totalLineas = (balanceData.gastos.admin?.length || 0) + 
+                                       (balanceData.gastos.commercial?.length || 0) + 
+                                       (balanceData.gastos.cogs?.length || 0);
+                    
                     balanceAnalysisResults.innerHTML = `
                         <div class="bg-green-50 border border-green-200 rounded-lg p-4">
                             <h4 class="font-semibold text-green-800 mb-2">✅ Balance Analizado</h4>
                             <p class="text-sm text-gray-700"><strong>Ventas detectadas:</strong> $${fNum(balanceData.ventas)}</p>
-                            <p class="text-sm text-gray-700 mt-2"><strong>Líneas de gastos encontradas:</strong></p>
+                            ${balanceData.totales ? `
+                            <p class="text-sm text-gray-700 mt-2"><strong>Totales de gastos:</strong></p>
                             <ul class="text-xs text-gray-600 ml-4 mt-1">
-                                <li>Administrativos: ${balanceData.gastos.admin.length}</li>
-                                <li>Comerciales: ${balanceData.gastos.commercial.length}</li>
-                                <li>COGS: ${balanceData.gastos.cogs.length}</li>
+                                <li>COGS: $${fNum(balanceData.totales.cogs)} (${((balanceData.totales.cogs/balanceData.ventas)*100).toFixed(1)}%)</li>
+                                <li>Administrativos: $${fNum(balanceData.totales.admin)} (${((balanceData.totales.admin/balanceData.ventas)*100).toFixed(1)}%)</li>
+                                <li>Comerciales: $${fNum(balanceData.totales.commercial)} (${((balanceData.totales.commercial/balanceData.ventas)*100).toFixed(1)}%)</li>
                             </ul>
+                            ` : ''}
+                            <p class="text-sm text-gray-700 mt-2"><strong>Líneas de gastos encontradas:</strong> ${totalLineas}</p>
                         </div>
                         <button id="applyBalanceDataButton" class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-md shadow-md transition duration-200 mt-3">
                             Aplicar Datos al Presupuesto
@@ -2769,6 +2782,7 @@
                     `;
                     
                     document.getElementById('applyBalanceDataButton').addEventListener('click', () => {
+                        console.log('Botón clickeado, aplicando datos...', balanceData);
                         applyBalanceData(balanceData);
                     });
 
@@ -2783,32 +2797,66 @@
             };
             
             const applyBalanceData = (balanceData) => {
-                // Aplicar ventas
+                console.log('Aplicando balance data:', balanceData);
+                const numMonths = parseInt(configInputs.numMonths.value) || 12;
+                console.log('Número de meses:', numMonths);
+                
+                // Aplicar ventas iniciales
                 if (balanceData.ventas > 0) {
                     configInputs.initialSales.value = balanceData.ventas;
+                    console.log('Ventas aplicadas:', balanceData.ventas);
                 }
                 
-                // Aplicar líneas de gastos
+                // Calcular y aplicar indicadores (porcentajes sobre ventas)
+                if (balanceData.ventas > 0 && balanceData.totales) {
+                    const percCOGS = balanceData.totales.cogs / balanceData.ventas;
+                    const percAdmin = balanceData.totales.admin / balanceData.ventas;
+                    const percCommercial = balanceData.totales.commercial / balanceData.ventas;
+                    
+                    configInputs.percCOGS.value = (percCOGS * 100).toFixed(2);
+                    configInputs.percAdmin.value = (percAdmin * 100).toFixed(2);
+                    configInputs.percCommercial.value = (percCommercial * 100).toFixed(2);
+                    console.log('Indicadores aplicados:', { percCOGS, percAdmin, percCommercial });
+                }
+                
+                // Aplicar líneas de gastos con importes mensuales
                 const rubroMapping = {
                     admin: 'admin',
                     commercial: 'commercial',
                     cogs: 'cogs'
                 };
                 
+                console.log('Procesando líneas de gastos...');
                 Object.keys(rubroMapping).forEach(aiKey => {
                     const lines = balanceData.gastos[aiKey] || [];
-                    lines.forEach(lineName => {
-                        addManualLine(rubroMapping[aiKey], lineName, 0);
+                    console.log(`Procesando ${aiKey}:`, lines);
+                    lines.forEach(lineData => {
+                        // Si lineData es un objeto con nombre e importe
+                        if (typeof lineData === 'object' && lineData.nombre && lineData.importe) {
+                            const importeMensual = lineData.importe / numMonths;
+                            console.log(`Agregando línea: ${lineData.nombre} con importe mensual: ${importeMensual}`);
+                            addManualLine(rubroMapping[aiKey], lineData.nombre, importeMensual);
+                        } else if (typeof lineData === 'string') {
+                            // Compatibilidad con formato anterior (solo nombres)
+                            console.log(`Agregando línea (string): ${lineData}`);
+                            addManualLine(rubroMapping[aiKey], lineData, 0);
+                        }
                     });
                 });
                 
                 // Regenerar proyección
+                console.log('Regenerando proyección...');
                 regenerarProyeccionCompleta();
                 
                 // Cerrar modal
+                console.log('Cerrando modal...');
                 closeBalanceImportModalFn();
                 
-                alert(`✅ Balance importado!\n\nVentas: $${fNum(balanceData.ventas)}\nLíneas de gastos: ${balanceData.gastos.admin.length + balanceData.gastos.commercial.length + balanceData.gastos.cogs.length}\n\nAhora puedes editar los valores mensuales de cada línea.`);
+                const totalLineas = (balanceData.gastos.admin?.length || 0) + 
+                                   (balanceData.gastos.commercial?.length || 0) + 
+                                   (balanceData.gastos.cogs?.length || 0);
+                
+                alert(`✅ Balance importado!\n\nVentas: $${fNum(balanceData.ventas)}\nIndicadores aplicados:\n- COGS/Ventas: ${configInputs.percCOGS.value}%\n- Admin/Ventas: ${configInputs.percAdmin.value}%\n- Comercial/Ventas: ${configInputs.percCommercial.value}%\n\nLíneas de gastos: ${totalLineas}\n\nLos importes han sido divididos por ${numMonths} meses.`);
             };
 
             // ------- INICIALIZACIÓN Y LISTENERS -------
