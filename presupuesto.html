@@ -1238,12 +1238,27 @@
                 }
             };
 
-
-            const callGeminiAPI = async (chatHistory) => {
-                const apiKey = document.getElementById('geminiApiKey').value.trim();
+            // Función helper para obtener el API key de forma confiable
+            const getApiKey = () => {
+                const inputElement = document.getElementById('geminiApiKey');
+                let apiKey = inputElement?.value?.trim() || '';
+                
+                // Si el input está vacío, intentar desde localStorage
                 if (!apiKey) {
+                    apiKey = localStorage.getItem('geminiApiKey') || '';
+                }
+                
+                console.log('getApiKey - Longitud:', apiKey.length, 'Primeros caracteres:', apiKey.substring(0, 10));
+                
+                if (!apiKey || apiKey.length < 10) {
                     throw new Error('Por favor ingrese su API Key de Gemini en la configuración.');
                 }
+                
+                return apiKey;
+            };
+
+            const callGeminiAPI = async (chatHistory) => {
+                const apiKey = getApiKey();
                 
                 const apiUrlBase = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
@@ -1754,8 +1769,9 @@
                     if (rowDef.isSubtotal) tr.classList.add('bg-gray-100');
                     if (rowDef.isFinal) tr.classList.add('font-bold', 'border-t-2', 'border-gray-400');
                     
-                    if (rowDef.hasDetail) {
-                        rowDef.editable = false; 
+                    // Los rubros con detalle siguen siendo editables
+                    const isDetailRow = rowDef.hasDetail;
+                    if (isDetailRow) {
                         tr.classList.add('detail-row'); 
                     }
                     
@@ -1791,12 +1807,47 @@
                         const value = state.projection[i][rowDef.key];
                         const cell = createCell(value, rowDef.editable, rowDef.key, i);
                         
-                        if (rowDef.hasDetail && !rowDef.editable) {
-                             // Para los rubros con detalle, la celda es no editable pero clicable para el modal
-                            cell.classList.add('has-detail', 'calculated-cell'); 
+                        if (isDetailRow) {
+                             // Para los rubros con detalle, la celda ES editable
+                            cell.classList.remove('calculated-cell');
+                            cell.classList.add('editable-cell', 'has-detail'); 
                             cell.dataset.label = rowDef.label;
-                            cell.title = "Doble-clic para gestionar líneas de detalle";
-                            cell.addEventListener('dblclick', () => openDetailModal(rowDef.key, i, rowDef.label));
+                            cell.title = "Editable (ajusta líneas proporcionalmente) | Doble-clic para gestionar detalle";
+                            cell.contentEditable = true;
+                            
+                            // Agregar evento de doble-clic para abrir el modal de detalle
+                            cell.addEventListener('dblclick', (e) => {
+                                e.preventDefault();
+                                openDetailModal(rowDef.key, i, rowDef.label);
+                            });
+                            
+                            // Agregar evento de cambio para ajustar proporcionalmente las líneas
+                            cell.addEventListener('blur', () => {
+                                const oldValue = state.projection[i][rowDef.key];
+                                const newValue = pNum(cell.textContent);
+                                
+                                if (newValue !== oldValue && oldValue !== 0) {
+                                    // Calcular el factor de ajuste
+                                    const factor = newValue / oldValue;
+                                    
+                                    // Ajustar todas las líneas de este rubro proporcionalmente
+                                    const manualLines = state.manualLines[rowDef.key] || {};
+                                    Object.keys(manualLines).forEach(lineId => {
+                                        if (state.manualLineValues[lineId] && state.manualLineValues[lineId][i] !== undefined) {
+                                            state.manualLineValues[lineId][i] *= factor;
+                                        }
+                                    });
+                                    
+                                    // Ajustar el remaining también
+                                    const remainingKey = `${rowDef.key}_remaining`;
+                                    if (state.manualLineValues[remainingKey] && state.manualLineValues[remainingKey][i] !== undefined) {
+                                        state.manualLineValues[remainingKey][i] *= factor;
+                                    }
+                                    
+                                    // Regenerar la proyección
+                                    regenerarProyeccionCompleta();
+                                }
+                            });
                         } else if (rowDef.editable) {
                             // Celdas editables normales
                             cell.classList.remove('calculated-cell');
@@ -2648,21 +2699,23 @@
             };
             
             const callGeminiForBalanceAnalysis = async (pdfBase64) => {
-                const apiKey = document.getElementById('geminiApiKey').value.trim();
-                if (!apiKey) {
-                    throw new Error('Por favor ingrese su API Key de Gemini en la configuración.');
-                }
+                const apiKey = getApiKey();
                 
                 const apiUrlBase = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
                 const systemPrompt = `Eres un contador experto analizando balances contables argentinos. Tu tarea es extraer información clave de un balance completo en PDF.
                 
+                IMPORTANTE: El formato numérico argentino usa PUNTO (.) para separar miles y COMA (,) para decimales.
+                Ejemplo: 1.234.567,89 = un millón doscientos treinta y cuatro mil quinientos sesenta y siete con 89 centavos.
+                En el JSON de salida debes usar PUNTOS para decimales (formato estándar JSON).
+                
                 Instrucciones:
-                1. Busca en el ESTADO DE RESULTADOS el valor de "Ventas" o "Ingresos por Ventas" del último período.
-                2. Busca en el ANEXO II (o similar) las líneas de gastos con sus importes, clasificándolas en 'admin', 'commercial' y 'cogs'.
+                1. Busca en el ESTADO DE RESULTADOS el valor de "Ventas" o "Ingresos por Ventas" del último período ANUAL.
+                2. Busca en el ANEXO II (o similar) las líneas de gastos ANUALES con sus importes, clasificándolas en 'admin', 'commercial' y 'cogs'.
                 3. Excluye totales, subtotales o partidas que no sean gastos operativos (ej. 'Resultado por Tenencia', 'RECPAM', 'Intereses').
-                4. Suma los importes totales de cada categoría.
-                5. Devuelve *únicamente* un objeto JSON con esta estructura:
+                4. Suma los importes totales ANUALES de cada categoría.
+                5. Convierte todos los números del formato argentino (punto miles, coma decimal) al formato JSON estándar (solo punto decimal).
+                6. Devuelve *únicamente* un objeto JSON con esta estructura:
                    {
                      "ventas": 1234567.89,
                      "totales": {
@@ -2676,7 +2729,8 @@
                        "cogs": [{"nombre": "Materia Prima", "importe": 300000}, ...]
                      }
                    }
-                6. No incluyas markdown ni otros textos fuera del JSON.`;
+                7. No incluyas markdown ni otros textos fuera del JSON.
+                8. RECUERDA: Los importes en el PDF tienen formato argentino (1.234.567,89) pero en el JSON deben estar en formato estándar (1234567.89).`;
 
                 const payload = {
                     contents: [{
@@ -2781,10 +2835,18 @@
                         </button>
                     `;
                     
-                    document.getElementById('applyBalanceDataButton').addEventListener('click', () => {
-                        console.log('Botón clickeado, aplicando datos...', balanceData);
-                        applyBalanceData(balanceData);
-                    });
+                    // Esperar un momento para que el DOM se actualice
+                    setTimeout(() => {
+                        const applyBtn = document.getElementById('applyBalanceDataButton');
+                        if (applyBtn) {
+                            applyBtn.addEventListener('click', () => {
+                                console.log('Botón clickeado, aplicando datos...', balanceData);
+                                applyBalanceData(balanceData);
+                            });
+                        } else {
+                            console.error('No se encontró el botón applyBalanceDataButton');
+                        }
+                    }, 100);
 
                 } catch (error) {
                     console.error("Error en análisis de balance:", error);
@@ -2798,13 +2860,14 @@
             
             const applyBalanceData = (balanceData) => {
                 console.log('Aplicando balance data:', balanceData);
-                const numMonths = parseInt(configInputs.numMonths.value) || 12;
+                const numMonths = parseInt(configInputs.months.value) || 12;
                 console.log('Número de meses:', numMonths);
                 
-                // Aplicar ventas iniciales
+                // Aplicar ventas MENSUALES (ventas anuales / 12)
                 if (balanceData.ventas > 0) {
-                    configInputs.initialSales.value = balanceData.ventas;
-                    console.log('Ventas aplicadas:', balanceData.ventas);
+                    const ventasMensuales = balanceData.ventas / 12;
+                    configInputs.initialSales.value = ventasMensuales;
+                    console.log('Ventas anuales:', balanceData.ventas, 'Ventas mensuales (mes 1):', ventasMensuales);
                 }
                 
                 // Calcular y aplicar indicadores (porcentajes sobre ventas)
@@ -2819,7 +2882,7 @@
                     console.log('Indicadores aplicados:', { percCOGS, percAdmin, percCommercial });
                 }
                 
-                // Aplicar líneas de gastos con importes mensuales
+                // Aplicar líneas de gastos con importes mensuales (importe anual / 12)
                 const rubroMapping = {
                     admin: 'admin',
                     commercial: 'commercial',
@@ -2833,8 +2896,9 @@
                     lines.forEach(lineData => {
                         // Si lineData es un objeto con nombre e importe
                         if (typeof lineData === 'object' && lineData.nombre && lineData.importe) {
-                            const importeMensual = lineData.importe / numMonths;
-                            console.log(`Agregando línea: ${lineData.nombre} con importe mensual: ${importeMensual}`);
+                            // Dividir el importe anual por 12 para obtener el importe mensual
+                            const importeMensual = lineData.importe / 12;
+                            console.log(`Agregando línea: ${lineData.nombre} - Anual: ${lineData.importe}, Mensual: ${importeMensual}`);
                             addManualLine(rubroMapping[aiKey], lineData.nombre, importeMensual);
                         } else if (typeof lineData === 'string') {
                             // Compatibilidad con formato anterior (solo nombres)
@@ -2856,7 +2920,7 @@
                                    (balanceData.gastos.commercial?.length || 0) + 
                                    (balanceData.gastos.cogs?.length || 0);
                 
-                alert(`✅ Balance importado!\n\nVentas: $${fNum(balanceData.ventas)}\nIndicadores aplicados:\n- COGS/Ventas: ${configInputs.percCOGS.value}%\n- Admin/Ventas: ${configInputs.percAdmin.value}%\n- Comercial/Ventas: ${configInputs.percCommercial.value}%\n\nLíneas de gastos: ${totalLineas}\n\nLos importes han sido divididos por ${numMonths} meses.`);
+                alert(`✅ Balance importado!\n\nVentas anuales: $${fNum(balanceData.ventas)}\nVentas mes 1: $${fNum(balanceData.ventas / 12)}\n\nIndicadores aplicados:\n- COGS/Ventas: ${configInputs.percCOGS.value}%\n- Admin/Ventas: ${configInputs.percAdmin.value}%\n- Comercial/Ventas: ${configInputs.percCommercial.value}%\n\nLíneas de gastos: ${totalLineas}\n\nTodos los importes han sido divididos por 12 para obtener valores mensuales.`);
             };
 
             // ------- INICIALIZACIÓN Y LISTENERS -------
@@ -2865,15 +2929,23 @@
                 // Inicializar base de datos
                 await initDB();
                 
-                // Validación visual del campo API Key
-                // Validación visual del campo API Key
+                // Cargar API Key desde localStorage si existe
+                const savedApiKey = localStorage.getItem('geminiApiKey');
+                if (savedApiKey) {
+                    geminiApiKeyInput.value = savedApiKey;
+                    geminiApiKeyInput.classList.add('api-key-valid');
+                }
+                
+                // Validación visual del campo API Key y guardar en localStorage
                 geminiApiKeyInput.addEventListener('input', () => {
                     const apiKey = geminiApiKeyInput.value.trim();
                     geminiApiKeyInput.classList.remove('api-key-valid', 'api-key-empty');
                     if (apiKey.length > 0) {
                         geminiApiKeyInput.classList.add('api-key-valid');
+                        localStorage.setItem('geminiApiKey', apiKey);
                     } else {
                         geminiApiKeyInput.classList.add('api-key-empty');
+                        localStorage.removeItem('geminiApiKey');
                     }
                 });
                 
