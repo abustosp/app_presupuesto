@@ -1012,24 +1012,31 @@
                 }
                 const sales = monthData.sales;
 
-                // 2. Calcular Rubros Base (solo si no fueron editados manualmente)
-                if (!monthEdited.cogs) monthData.cogs = sales * cfg.percCOGS;
-                if (!monthEdited.admin) monthData.admin = sales * cfg.percAdmin;
-                if (!monthEdited.commercial) monthData.commercial = sales * cfg.percCommercial;
-                if (!monthEdited.amort) monthData.amort = sales * cfg.percAmort;
-                if (!monthEdited.interest) monthData.interest = sales * cfg.percInterest;
-
-                // 3. Aplicar líneas manuales y calcular "Final" para COGS, Admin, Commercial
+                // 2. Calcular Rubros Base
+                // Si hay líneas manuales, el total del rubro es la SUMA de las líneas
+                // Si NO hay líneas manuales, usar el porcentaje sobre ventas
                 const rubrosConDetalle = ['cogs', 'admin', 'commercial'];
                 rubrosConDetalle.forEach(key => {
-                    monthData[`${key}Base`] = monthData[key]; // Guardar el valor proyectado (o editado)
                     const totalManual = calculateTotalManualForMonth(key, mesIndex);
+                    const hasManualLines = (state.manualLines[key] && Object.keys(state.manualLines[key]).length > 0);
                     
-                    // El valor final del rubro es el valor base proyectado. El restante es solo una visualización.
-                    // Si hay líneas manuales, la celda de restante se calcula: baseTotal - totalManual.
-                    // Si la celda base fue editada, el total ya fue fijado. Si no, usa el proyectado.
-                    monthData[key] = monthData[key]; // Se mantiene el valor del P&L
+                    if (!monthEdited[key]) {
+                        if (hasManualLines) {
+                            // Si hay líneas manuales, el total ES la suma de las líneas
+                            monthData[key] = totalManual;
+                        } else {
+                            // Si NO hay líneas manuales, usar el porcentaje
+                            monthData[key] = sales * cfg[`perc${key.charAt(0).toUpperCase() + key.slice(1)}`];
+                        }
+                    }
+                    
+                    // Guardar el valor base para el modal (siempre guarda lo calculado o editado)
+                    monthData[`${key}Base`] = monthData[key];
                 });
+                
+                // Para amortizaciones e intereses, siempre usar porcentaje (no tienen líneas manuales)
+                if (!monthEdited.amort) monthData.amort = sales * cfg.percAmort;
+                if (!monthEdited.interest) monthData.interest = sales * cfg.percInterest;
                 
                 // 4. Calcular Subtotales (Estos SIEMPRE se recalculan)
                 monthData.grossMargin = monthData.sales - monthData.cogs;
@@ -2650,6 +2657,32 @@
 
             // ------- IMPORTACIÓN DE BALANCE COMPLETO (PDF) -------
             
+            /*
+             * FLUJO DE CONVERSIÓN DE FORMATO ARGENTINO:
+             * 
+             * 1. PDF Balance: Números en formato argentino (1.234.567,89)
+             *    - Punto (.) = separador de miles
+             *    - Coma (,) = separador de decimales
+             * 
+             * 2. Gemini Vision: Extrae números como STRINGS manteniendo formato argentino
+             *    - Ejemplo: "1.234.567,89" (string)
+             * 
+             * 3. parseArgentineNumber(): Convierte strings a números
+             *    - Remueve puntos: "1.234.567,89" → "1234567,89"
+             *    - Reemplaza coma por punto: "1234567,89" → "1234567.89"
+             *    - Convierte a float: 1234567.89
+             * 
+             * 4. Math.round(): Redondea a enteros (sin decimales)
+             *    - 1234567.89 → 1234568
+             *    - Esto evita errores de precisión en cálculos
+             * 
+             * 5. División por 12: Convierte anual a mensual
+             *    - Ventas: 1234568 ÷ 12 = 102881 (redondeado)
+             *    - Gastos: cada importe ÷ 12 (redondeado)
+             * 
+             * RESULTADO: Todos los valores en la app son números enteros sin decimales
+             */
+            
             let currentBalancePdf = null;
             
             const openBalanceImportModal = () => {
@@ -2698,6 +2731,39 @@
                 });
             };
             
+            // Función para convertir formato argentino a número estándar
+            const parseArgentineNumber = (value) => {
+                if (typeof value === 'number') return value;
+                if (typeof value === 'string') {
+                    // Limpiar espacios y caracteres extraños
+                    let cleaned = value.trim();
+                    
+                    // Contar puntos y comas para determinar el formato
+                    const dotCount = (cleaned.match(/\./g) || []).length;
+                    const commaCount = (cleaned.match(/,/g) || []).length;
+                    
+                    // Formato argentino: múltiples puntos (miles) y una coma (decimal)
+                    // Ejemplo: "1.234.567,89" o "38.281.753"
+                    if (dotCount > 0 && commaCount <= 1) {
+                        // Es formato argentino: remover puntos, cambiar coma por punto
+                        cleaned = cleaned.replace(/\./g, '').replace(',', '.');
+                    } 
+                    // Formato estándar: una coma o ninguna, sin puntos en miles
+                    // Ejemplo: "1234567.89" o "1234567,89"
+                    else if (commaCount === 1 && dotCount === 0) {
+                        // Solo cambiar coma por punto
+                        cleaned = cleaned.replace(',', '.');
+                    }
+                    // Si tiene un solo punto, asumimos que es decimal estándar
+                    // Ejemplo: "1234567.89"
+                    
+                    const result = parseFloat(cleaned) || 0;
+                    console.log(`parseArgentineNumber: "${value}" → "${cleaned}" → ${result}`);
+                    return result;
+                }
+                return 0;
+            };
+            
             const callGeminiForBalanceAnalysis = async (pdfBase64) => {
                 const apiKey = getApiKey();
                 
@@ -2705,23 +2771,30 @@
 
                 const systemPrompt = `Eres un contador experto analizando balances contables argentinos. Tu tarea es extraer información clave de un balance completo en PDF.
                 
-                IMPORTANTE: El formato numérico argentino usa PUNTO (.) para separar miles y COMA (,) para decimales.
-                Ejemplo: 1.234.567,89 = un millón doscientos treinta y cuatro mil quinientos sesenta y siete con 89 centavos.
-                En el JSON de salida debes usar PUNTOS para decimales (formato estándar JSON).
+                FORMATO NUMÉRICO CRÍTICO - LEE CON ATENCIÓN:
+                - El PDF usa formato ARGENTINO: punto (.) para miles, coma (,) para decimales
+                - Ejemplos en el PDF: 
+                  * 38.281.753 (treinta y ocho millones)
+                  * 1.234.567,89 (un millón doscientos treinta y cuatro mil con 89 centavos)
+                  * 850.000,50 (ochocientos cincuenta mil con 50 centavos)
+                
+                IMPORTANTE: En tu respuesta JSON, debes devolver SOLO EL NÚMERO SIN PUNTOS NI COMAS:
+                - Si ves "38.281.753" en el PDF → devuelve 38281753 (número sin separadores)
+                - Si ves "1.234.567,89" en el PDF → devuelve 1234568 (redondeado a entero)
+                - Si ves "850.000,50" en el PDF → devuelve 850001 (redondeado a entero)
                 
                 Instrucciones:
                 1. Busca en el ESTADO DE RESULTADOS el valor de "Ventas" o "Ingresos por Ventas" del último período ANUAL.
                 2. Busca en el ANEXO II (o similar) las líneas de gastos ANUALES con sus importes, clasificándolas en 'admin', 'commercial' y 'cogs'.
                 3. Excluye totales, subtotales o partidas que no sean gastos operativos (ej. 'Resultado por Tenencia', 'RECPAM', 'Intereses').
                 4. Suma los importes totales ANUALES de cada categoría.
-                5. Convierte todos los números del formato argentino (punto miles, coma decimal) al formato JSON estándar (solo punto decimal).
-                6. Devuelve *únicamente* un objeto JSON con esta estructura:
+                5. Devuelve *únicamente* un objeto JSON con esta estructura (los números como ENTEROS sin separadores):
                    {
-                     "ventas": 1234567.89,
+                     "ventas": 38281753,
                      "totales": {
-                       "cogs": 500000.00,
-                       "admin": 200000.00,
-                       "commercial": 150000.00
+                       "cogs": 22093685,
+                       "admin": 500000,
+                       "commercial": 150000
                      },
                      "gastos": {
                        "admin": [{"nombre": "Sueldos Admin", "importe": 100000}, ...],
@@ -2729,8 +2802,11 @@
                        "cogs": [{"nombre": "Materia Prima", "importe": 300000}, ...]
                      }
                    }
-                7. No incluyas markdown ni otros textos fuera del JSON.
-                8. RECUERDA: Los importes en el PDF tienen formato argentino (1.234.567,89) pero en el JSON deben estar en formato estándar (1234567.89).`;
+                6. No incluyas markdown ni otros textos fuera del JSON.
+                7. MUY IMPORTANTE: 
+                   - Lee los números del PDF ignorando los PUNTOS (son separadores de miles)
+                   - Ignora los decimales después de la COMA
+                   - Devuelve solo NÚMEROS ENTEROS sin ningún separador`;
 
                 const payload = {
                     contents: [{
@@ -2783,7 +2859,55 @@
                 if (!textResult) return { ventas: 0, totales: { cogs: 0, admin: 0, commercial: 0 }, gastos: { admin: [], commercial: [], cogs: [] } };
 
                 try {
-                    return JSON.parse(textResult);
+                    const parsedData = JSON.parse(textResult);
+                    
+                    console.log('========================================');
+                    console.log('DATOS RECIBIDOS DE GEMINI (raw):');
+                    console.log('Ventas:', parsedData.ventas, typeof parsedData.ventas);
+                    console.log('COGS total:', parsedData.totales?.cogs, typeof parsedData.totales?.cogs);
+                    console.log('Admin total:', parsedData.totales?.admin, typeof parsedData.totales?.admin);
+                    console.log('JSON completo:', JSON.stringify(parsedData, null, 2));
+                    console.log('========================================');
+                    
+                    // Convertir todos los valores (pueden venir como números o strings)
+                    const convertedData = {
+                        ventas: Math.round(parseArgentineNumber(parsedData.ventas)),
+                        totales: {
+                            cogs: Math.round(parseArgentineNumber(parsedData.totales?.cogs || 0)),
+                            admin: Math.round(parseArgentineNumber(parsedData.totales?.admin || 0)),
+                            commercial: Math.round(parseArgentineNumber(parsedData.totales?.commercial || 0))
+                        },
+                        gastos: {
+                            admin: (parsedData.gastos?.admin || []).map(g => ({
+                                nombre: g.nombre,
+                                importe: Math.round(parseArgentineNumber(g.importe))
+                            })),
+                            commercial: (parsedData.gastos?.commercial || []).map(g => ({
+                                nombre: g.nombre,
+                                importe: Math.round(parseArgentineNumber(g.importe))
+                            })),
+                            cogs: (parsedData.gastos?.cogs || []).map(g => ({
+                                nombre: g.nombre,
+                                importe: Math.round(parseArgentineNumber(g.importe))
+                            }))
+                        }
+                    };
+                    
+                    console.log('========================================');
+                    console.log('DATOS CONVERTIDOS (finales):');
+                    console.log('Ventas:', convertedData.ventas);
+                    console.log('COGS total:', convertedData.totales.cogs);
+                    console.log('Admin total:', convertedData.totales.admin);
+                    console.log('Commercial total:', convertedData.totales.commercial);
+                    console.log('========================================');
+                    
+                    // Validación de coherencia
+                    if (convertedData.ventas > 0 && convertedData.totales.cogs > convertedData.ventas * 10) {
+                        console.warn('⚠️ ADVERTENCIA: COGS es más de 10 veces las ventas. Probablemente hay un error de conversión.');
+                        console.warn('Ventas:', convertedData.ventas, 'COGS:', convertedData.totales.cogs);
+                    }
+                    
+                    return convertedData;
                 } catch (e) {
                     console.error("Error al parsear JSON del balance:", e, textResult);
                     return { ventas: 0, totales: { cogs: 0, admin: 0, commercial: 0 }, gastos: { admin: [], commercial: [], cogs: [] } };
@@ -2859,68 +2983,76 @@
             };
             
             const applyBalanceData = (balanceData) => {
-                console.log('Aplicando balance data:', balanceData);
+                console.log('========================================');
+                console.log('APLICANDO BALANCE DATA');
+                console.log('Datos recibidos (ya convertidos):', balanceData);
+                console.log('========================================');
+                
                 const numMonths = parseInt(configInputs.months.value) || 12;
-                console.log('Número de meses:', numMonths);
                 
-                // Aplicar ventas MENSUALES (ventas anuales / 12)
+                // 1. Aplicar SOLO las ventas mensuales (ventas anuales / 12)
                 if (balanceData.ventas > 0) {
-                    const ventasMensuales = balanceData.ventas / 12;
+                    const ventasMensuales = Math.round(balanceData.ventas / 12);
                     configInputs.initialSales.value = ventasMensuales;
-                    console.log('Ventas anuales:', balanceData.ventas, 'Ventas mensuales (mes 1):', ventasMensuales);
+                    console.log('✓ Ventas configuradas:');
+                    console.log('  - Anuales:', fNum(balanceData.ventas));
+                    console.log('  - Mensuales (Mes 1):', fNum(ventasMensuales));
                 }
                 
-                // Calcular y aplicar indicadores (porcentajes sobre ventas)
+                // 2. CONFIGURAR los porcentajes sobre ventas (esto hará que cada mes aplique el % correcto)
+                console.log('✓ Configurando porcentajes sobre ventas:');
                 if (balanceData.ventas > 0 && balanceData.totales) {
-                    const percCOGS = balanceData.totales.cogs / balanceData.ventas;
-                    const percAdmin = balanceData.totales.admin / balanceData.ventas;
-                    const percCommercial = balanceData.totales.commercial / balanceData.ventas;
+                    const percCOGS = (balanceData.totales.cogs / balanceData.ventas) * 100;
+                    const percAdmin = (balanceData.totales.admin / balanceData.ventas) * 100;
+                    const percCommercial = (balanceData.totales.commercial / balanceData.ventas) * 100;
                     
-                    configInputs.percCOGS.value = (percCOGS * 100).toFixed(2);
-                    configInputs.percAdmin.value = (percAdmin * 100).toFixed(2);
-                    configInputs.percCommercial.value = (percCommercial * 100).toFixed(2);
-                    console.log('Indicadores aplicados:', { percCOGS, percAdmin, percCommercial });
+                    configInputs.percCOGS.value = percCOGS.toFixed(2);
+                    configInputs.percAdmin.value = percAdmin.toFixed(2);
+                    configInputs.percCommercial.value = percCommercial.toFixed(2);
+                    
+                    console.log(`  - COGS: ${percCOGS.toFixed(2)}%`);
+                    console.log(`  - Admin: ${percAdmin.toFixed(2)}%`);
+                    console.log(`  - Commercial: ${percCommercial.toFixed(2)}%`);
                 }
                 
-                // Aplicar líneas de gastos con importes mensuales (importe anual / 12)
+                // 3. Crear líneas de detalle con importes mensuales (línea anual ÷ 12)
                 const rubroMapping = {
                     admin: 'admin',
                     commercial: 'commercial',
                     cogs: 'cogs'
                 };
                 
-                console.log('Procesando líneas de gastos...');
+                console.log('✓ Creando líneas de gastos con importes mensuales fijos:');
                 Object.keys(rubroMapping).forEach(aiKey => {
                     const lines = balanceData.gastos[aiKey] || [];
-                    console.log(`Procesando ${aiKey}:`, lines);
+                    console.log(`  [${aiKey.toUpperCase()}] - ${lines.length} líneas:`);
+                    
                     lines.forEach(lineData => {
-                        // Si lineData es un objeto con nombre e importe
                         if (typeof lineData === 'object' && lineData.nombre && lineData.importe) {
-                            // Dividir el importe anual por 12 para obtener el importe mensual
-                            const importeMensual = lineData.importe / 12;
-                            console.log(`Agregando línea: ${lineData.nombre} - Anual: ${lineData.importe}, Mensual: ${importeMensual}`);
+                            const importeMensual = Math.round(lineData.importe / 12);
+                            console.log(`    - ${lineData.nombre}: $${fNum(lineData.importe)}/año → $${fNum(importeMensual)}/mes`);
                             addManualLine(rubroMapping[aiKey], lineData.nombre, importeMensual);
-                        } else if (typeof lineData === 'string') {
-                            // Compatibilidad con formato anterior (solo nombres)
-                            console.log(`Agregando línea (string): ${lineData}`);
-                            addManualLine(rubroMapping[aiKey], lineData, 0);
                         }
                     });
                 });
                 
-                // Regenerar proyección
-                console.log('Regenerando proyección...');
+                // 4. Regenerar proyección (las líneas se sumarán automáticamente)
+                console.log('✓ Regenerando proyección con líneas manuales...');
+                console.log('========================================');
                 regenerarProyeccionCompleta();
                 
                 // Cerrar modal
-                console.log('Cerrando modal...');
                 closeBalanceImportModalFn();
                 
                 const totalLineas = (balanceData.gastos.admin?.length || 0) + 
                                    (balanceData.gastos.commercial?.length || 0) + 
                                    (balanceData.gastos.cogs?.length || 0);
                 
-                alert(`✅ Balance importado!\n\nVentas anuales: $${fNum(balanceData.ventas)}\nVentas mes 1: $${fNum(balanceData.ventas / 12)}\n\nIndicadores aplicados:\n- COGS/Ventas: ${configInputs.percCOGS.value}%\n- Admin/Ventas: ${configInputs.percAdmin.value}%\n- Comercial/Ventas: ${configInputs.percCommercial.value}%\n\nLíneas de gastos: ${totalLineas}\n\nTodos los importes han sido divididos por 12 para obtener valores mensuales.`);
+                const ventasMensuales = Math.round(balanceData.ventas / 12);
+                
+                alert(`Balance importado! Ventas: ${fNum(ventasMensuales)}/mes. COGS: ${configInputs.percCOGS.value}%, Admin: ${configInputs.percAdmin.value}%, Comercial: ${configInputs.percCommercial.value}%. Total: ${totalLineas} líneas.`);
+                
+                alert(`✅ Balance importado correctamente!\n\n💰 VENTAS:\n- Anuales: $${fNum(balanceData.ventas)}\n- Mensuales (Mes 1): $${fNum(ventasMensuales)}\n\n� GASTOS MENSUALES (suma de líneas):\n- COGS: $${fNum(totalCOGS)} (${totalLineas > 0 ? balanceData.gastos.cogs?.length || 0 : 0} líneas)\n- Administrativos: $${fNum(totalAdmin)} (${totalLineas > 0 ? balanceData.gastos.admin?.length || 0 : 0} líneas)\n- Comerciales: $${fNum(totalCommercial)} (${totalLineas > 0 ? balanceData.gastos.commercial?.length || 0 : 0} líneas)\n\n✓ Total de ${totalLineas} líneas de gastos creadas\n✓ Los porcentajes se han puesto en 0%\n✓ Cada mes sumará las líneas manuales importadas`);
             };
 
             // ------- INICIALIZACIÓN Y LISTENERS -------
