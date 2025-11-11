@@ -6,3 +6,12 @@ Thumbs.db
 *.tmp
 *.bak
 *~
+
+# Entornos y compilados
+__pycache__/
+*.pyc
+.venv/
+
+# Datos de la aplicación
+data/
+*.db

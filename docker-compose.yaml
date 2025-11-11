@@ -1,0 +1,19 @@
+version: "3.9"
+
+services:
+  presupuestos:
+    build: .
+    container_name: presupuestos_app
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    volumes:
+      - budget_data:/app/data
+    restart: unless-stopped
+
+volumes:
+  budget_data:
