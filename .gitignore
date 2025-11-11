@@ -15,3 +15,6 @@ __pycache__/
 # Datos de la aplicación
 data/
 *.db
+
+# variables de entorno
+.env
