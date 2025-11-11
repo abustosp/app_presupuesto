@@ -12,7 +12,7 @@ services:
     ports:
       - "${APP_PORT:-8000}:8000"
     volumes:
-      - budget_data:/app/data
+      - ./budget_data:/app/data
     restart: unless-stopped
 
 volumes:
