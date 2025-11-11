@@ -700,124 +700,71 @@
                 currentModal: { rubroKey: null, mesIndex: null },
                 aiChatModal: { rubroKey: null, rubroLabel: null, history: [] },
                 logoDataUrl: null, // Almacena el logo en base64
-                currentProjectName: null // Nombre del proyecto actual
+                currentProjectName: null, // Nombre del proyecto actual
+                currentProjectId: null, // Identificador en la API
+                currentProjectTimestamp: null // Marca temporal original
             };
 
-            // ------- BASE DE DATOS LOCAL (Archivos JSON en Disco) -------
-            
-            // Directorio donde se guardarán los presupuestos
-            let presupuestosDir = null;
-            
+            // ------- API DE PRESUPUESTOS (Backend self-hosted) -------
+
+            const API_BASE_URL = '/api';
+
             const initDB = async () => {
-                // Ya no necesitamos IndexedDB, usamos el sistema de archivos
-                // Intentar recuperar el directorio guardado previamente
-                const savedDirHandle = localStorage.getItem('presupuestosDirHandle');
-                if (savedDirHandle) {
-                    try {
-                        // En futuras sesiones, podríamos recuperar el handle
-                        // Por ahora, el usuario deberá seleccionar cada vez
-                    } catch (e) {
-                        console.log('No se pudo recuperar el directorio anterior');
-                    }
-                }
-                return Promise.resolve();
-            };
-
-            const selectPresupuestosDirectory = async () => {
                 try {
-                    // Solicitar al usuario que seleccione una carpeta
-                    const dirHandle = await window.showDirectoryPicker({
-                        mode: 'readwrite',
-                        startIn: 'documents'
-                    });
-                    presupuestosDir = dirHandle;
-                    return dirHandle;
-                } catch (e) {
-                    if (e.name !== 'AbortError') {
-                        console.error('Error al seleccionar directorio:', e);
+                    const response = await fetch(`${API_BASE_URL}/health`);
+                    if (response.ok) {
+                        console.log('✅ API de presupuestos disponible');
+                    } else {
+                        console.warn('⚠️ No se pudo verificar la API de presupuestos');
                     }
-                    return null;
+                } catch (error) {
+                    console.warn('⚠️ No fue posible conectar con la API de presupuestos:', error);
                 }
             };
 
             const saveProjectToDB = async (projectData) => {
-                if (!presupuestosDir) {
-                    presupuestosDir = await selectPresupuestosDirectory();
-                    if (!presupuestosDir) {
-                        throw new Error('No se seleccionó una carpeta para guardar');
-                    }
+                const url = projectData.id
+                    ? `${API_BASE_URL}/budgets/${projectData.id}`
+                    : `${API_BASE_URL}/budgets`;
+
+                const method = projectData.id ? 'PUT' : 'POST';
+
+                const response = await fetch(url, {
+                    method,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(projectData)
+                });
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`Error de API (${response.status}): ${errorText || 'No se pudo guardar el presupuesto'}`);
                 }
 
-                // Crear nombre de archivo seguro
-                const timestamp = Date.now();
-                const safeName = projectData.name.replace(/[^a-z0-9]/gi, '_').toLowerCase();
-                const fileName = `presupuesto_${safeName}_${timestamp}.json`;
-
-                try {
-                    // Crear el archivo
-                    const fileHandle = await presupuestosDir.getFileHandle(fileName, { create: true });
-                    const writable = await fileHandle.createWritable();
-                    
-                    // Escribir el contenido
-                    await writable.write(JSON.stringify(projectData, null, 2));
-                    await writable.close();
-                    
-                    return { success: true, fileName };
-                } catch (error) {
-                    console.error('Error al guardar archivo:', error);
-                    throw error;
-                }
+                return response.json();
             };
 
             const loadProjectsFromDB = async () => {
-                if (!presupuestosDir) {
-                    presupuestosDir = await selectPresupuestosDirectory();
-                    if (!presupuestosDir) {
-                        return [];
-                    }
+                const response = await fetch(`${API_BASE_URL}/budgets`);
+                if (!response.ok) {
+                    throw new Error('No se pudieron obtener los presupuestos guardados');
                 }
-
-                const projects = [];
-                try {
-                    // Leer todos los archivos JSON del directorio
-                    for await (const entry of presupuestosDir.values()) {
-                        if (entry.kind === 'file' && entry.name.startsWith('presupuesto_') && entry.name.endsWith('.json')) {
-                            try {
-                                const file = await entry.getFile();
-                                const content = await file.text();
-                                const projectData = JSON.parse(content);
-                                projectData.fileName = entry.name;
-                                projectData.fileHandle = entry;
-                                projects.push(projectData);
-                            } catch (e) {
-                                console.error(`Error leyendo ${entry.name}:`, e);
-                            }
-                        }
-                    }
-                } catch (error) {
-                    console.error('Error al listar archivos:', error);
-                }
-                
-                return projects;
+                return response.json();
             };
 
-            const deleteProjectFromDB = async (fileName) => {
-                if (!presupuestosDir) return;
-                
-                try {
-                    await presupuestosDir.removeEntry(fileName);
-                } catch (error) {
-                    console.error('Error al eliminar archivo:', error);
-                    throw error;
+            const loadProjectById = async (projectId) => {
+                const response = await fetch(`${API_BASE_URL}/budgets/${projectId}`);
+                if (!response.ok) {
+                    throw new Error('No se pudo cargar el presupuesto seleccionado');
                 }
+                return response.json();
             };
 
-            const changeSaveLocation = async () => {
-                const newDir = await selectPresupuestosDirectory();
-                if (newDir) {
-                    presupuestosDir = newDir;
-                    alert('✅ Nueva ubicación seleccionada. Los presupuestos se guardarán aquí.');
-                    await renderSavedProjects();
+            const deleteProjectFromDB = async (projectId) => {
+                const response = await fetch(`${API_BASE_URL}/budgets/${projectId}`, {
+                    method: 'DELETE'
+                });
+                if (!response.ok) {
+                    throw new Error('No se pudo eliminar el presupuesto');
                 }
             };
 
@@ -2499,8 +2446,9 @@
                 }
                 
                 const projectData = {
+                    id: state.currentProjectId,
                     name: name,
-                    timestamp: Date.now(),
+                    timestamp: state.currentProjectTimestamp || Date.now(),
                     state: {
                         config: state.config,
                         projection: state.projection,
@@ -2512,11 +2460,17 @@
                         logoDataUrl: state.logoDataUrl
                     }
                 };
-                
+
+                if (!projectData.id) {
+                    delete projectData.id;
+                }
+
                 try {
-                    await saveProjectToDB(projectData);
-                    state.currentProjectName = name;
-                    saveSuccess.textContent = `✅ Guardado en: ${projectData.name}`;
+                    const savedProject = await saveProjectToDB(projectData);
+                    state.currentProjectName = savedProject.name;
+                    state.currentProjectId = savedProject.id;
+                    state.currentProjectTimestamp = savedProject.timestamp;
+                    saveSuccess.textContent = `✅ Guardado en el servidor: ${savedProject.name}`;
                     saveSuccess.style.display = 'block';
                     setTimeout(() => closeSaveModal(), 2000);
                 } catch (error) {
@@ -2535,120 +2489,118 @@
                 try {
                     const projects = await loadProjectsFromDB();
                     savedProjectsList.innerHTML = '';
-                    
+
                     if (projects.length === 0) {
                         savedProjectsList.innerHTML = `
-                            <p class="text-gray-500 text-sm mb-3">No hay presupuestos guardados en esta carpeta.</p>
-                            <button id="changeLocationBtn" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded-md">
-                                📁 Cambiar Ubicación de Guardado
-                            </button>
+                            <p class="text-gray-500 text-sm">No hay presupuestos guardados en el servidor.</p>
                         `;
-                        document.getElementById('changeLocationBtn')?.addEventListener('click', changeSaveLocation);
                         return;
                     }
-                    
-                    // Botón para cambiar ubicación
-                    const changeLocBtn = document.createElement('button');
-                    changeLocBtn.id = 'changeLocationBtn';
-                    changeLocBtn.className = 'w-full bg-gray-500 hover:bg-gray-600 text-white text-sm font-bold py-2 px-3 rounded-md mb-3';
-                    changeLocBtn.textContent = '📁 Cambiar Carpeta';
-                    changeLocBtn.addEventListener('click', changeSaveLocation);
-                    savedProjectsList.appendChild(changeLocBtn);
-                    
+
                     projects.sort((a, b) => b.timestamp - a.timestamp);
-                    
+
                     projects.forEach(project => {
                         const item = document.createElement('div');
                         item.className = 'flex justify-between items-center p-3 border rounded-md bg-white shadow-sm hover:bg-gray-50';
-                        const date = new Date(project.timestamp);
+                        const updatedAt = new Date(project.updated_at);
                         item.innerHTML = `
                             <div>
                                 <span class="font-semibold text-gray-800">${project.name}</span>
-                                <span class="text-xs text-gray-500 block">${date.toLocaleString('es-AR')}</span>
-                                <span class="text-xs text-gray-400 block">📄 ${project.fileName}</span>
+                                <span class="text-xs text-gray-500 block">Actualizado: ${updatedAt.toLocaleString('es-AR')}</span>
+                                <span class="text-[10px] text-gray-400 block">ID: ${project.id}</span>
                             </div>
                             <div class="flex space-x-2">
-                                <button data-filename="${project.fileName}" class="load-project-btn bg-blue-500 hover:bg-blue-600 text-white text-xs font-bold py-2 px-3 rounded-md">
+                                <button data-project-id="${project.id}" class="load-project-btn bg-blue-500 hover:bg-blue-600 text-white text-xs font-bold py-2 px-3 rounded-md">
                                     Cargar
                                 </button>
-                                <button data-filename="${project.fileName}" class="delete-project-btn bg-red-500 hover:bg-red-600 text-white text-xs font-bold py-2 px-3 rounded-md">
+                                <button data-project-id="${project.id}" class="delete-project-btn bg-red-500 hover:bg-red-600 text-white text-xs font-bold py-2 px-3 rounded-md">
                                     Eliminar
                                 </button>
                             </div>
                         `;
                         savedProjectsList.appendChild(item);
                     });
-                    
+
                     document.querySelectorAll('.load-project-btn').forEach(btn => {
-                        btn.addEventListener('click', () => handleLoadProject(btn.dataset.filename, projects));
+                        btn.addEventListener('click', () => handleLoadProject(btn.dataset.projectId));
                     });
-                    
+
                     document.querySelectorAll('.delete-project-btn').forEach(btn => {
-                        btn.addEventListener('click', () => handleDeleteProject(btn.dataset.filename));
+                        btn.addEventListener('click', () => handleDeleteProject(btn.dataset.projectId));
                     });
-                    
+
                 } catch (error) {
                     savedProjectsList.innerHTML = `
-                        <p class="text-red-500 mb-3">Error al cargar proyectos: ${error.message}</p>
-                        <button id="changeLocationBtn" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded-md">
-                            📁 Seleccionar Carpeta de Presupuestos
-                        </button>
+                        <p class="text-red-500">Error al cargar proyectos: ${error.message}</p>
+                        <p class="text-sm text-gray-500">Verificá que el backend esté en ejecución.</p>
                     `;
-                    document.getElementById('changeLocationBtn')?.addEventListener('click', changeSaveLocation);
                 }
             };
-            
-            const handleLoadProject = (fileName, projects) => {
-                const project = projects.find(p => p.fileName === fileName);
-                if (!project) return;
-                
-                // Restaurar el estado
-                state.config = project.state.config;
-                state.projection = project.state.projection;
-                state.isEdited = project.state.isEdited;
-                state.manualLines = project.state.manualLines;
-                state.manualLineValues = project.state.manualLineValues;
-                state.cashFlowDistribution = project.state.cashFlowDistribution;
-                state.cashFlow = project.state.cashFlow;
-                state.logoDataUrl = project.state.logoDataUrl;
-                state.currentProjectName = project.name;
-                
-                // Actualizar inputs de configuración
-                configInputs.initialSales.value = state.config.initialSales;
-                configInputs.salesGrowth.value = state.config.salesGrowth * 100;
-                configInputs.months.value = state.config.months;
-                configInputs.percCOGS.value = state.config.percCOGS * 100;
-                configInputs.percAdmin.value = state.config.percAdmin * 100;
-                configInputs.percCommercial.value = state.config.percCommercial * 100;
-                configInputs.percAmort.value = state.config.percAmort * 100;
-                configInputs.percInterest.value = state.config.percInterest * 100;
-                configInputs.percTax.value = state.config.percTax * 100;
-                cashFlowInputs.initialCash.value = state.config.initialCash;
-                cashFlowInputs.paymentTerms.value = state.config.paymentTerms;
-                cashFlowInputs.collectionTerms.value = state.config.collectionTerms;
-                
-                // Restaurar logo si existe
-                if (state.logoDataUrl) {
-                    logoPreview.src = state.logoDataUrl;
-                    logoPreview.style.display = 'block';
-                }
-                
-                // Renderizar
-                if (isCashFlowActive) {
-                    renderCashFlowTable();
-                } else {
-                    renderTable();
-                }
-                renderKPIs();
-                
-                closeLoadModal();
-            };
-            
-            const handleDeleteProject = async (fileName) => {
-                if (!confirm('¿Estás seguro de eliminar este presupuesto del disco?')) return;
-                
+
+            const handleLoadProject = async (projectId) => {
                 try {
-                    await deleteProjectFromDB(fileName);
+                    const project = await loadProjectById(projectId);
+
+                    // Restaurar el estado
+                    state.config = project.state.config;
+                    state.projection = project.state.projection;
+                    state.isEdited = project.state.isEdited;
+                    state.manualLines = project.state.manualLines;
+                    state.manualLineValues = project.state.manualLineValues;
+                    state.cashFlowDistribution = project.state.cashFlowDistribution;
+                    state.cashFlow = project.state.cashFlow;
+                    state.logoDataUrl = project.state.logoDataUrl;
+                    state.currentProjectName = project.name;
+                    state.currentProjectId = project.id;
+                    state.currentProjectTimestamp = project.timestamp;
+
+                    // Actualizar inputs de configuración
+                    configInputs.initialSales.value = state.config.initialSales;
+                    configInputs.salesGrowth.value = state.config.salesGrowth * 100;
+                    configInputs.months.value = state.config.months;
+                    configInputs.percCOGS.value = state.config.percCOGS * 100;
+                    configInputs.percAdmin.value = state.config.percAdmin * 100;
+                    configInputs.percCommercial.value = state.config.percCommercial * 100;
+                    configInputs.percAmort.value = state.config.percAmort * 100;
+                    configInputs.percInterest.value = state.config.percInterest * 100;
+                    configInputs.percTax.value = state.config.percTax * 100;
+                    cashFlowInputs.initialCash.value = state.config.initialCash;
+                    cashFlowInputs.paymentTerms.value = state.config.paymentTerms;
+                    cashFlowInputs.collectionTerms.value = state.config.collectionTerms;
+
+                    // Restaurar logo si existe
+                    if (state.logoDataUrl) {
+                        logoPreview.src = state.logoDataUrl;
+                        logoPreview.style.display = 'block';
+                    } else {
+                        logoPreview.style.display = 'none';
+                        logoPreview.removeAttribute('src');
+                    }
+
+                    // Renderizar
+                    if (isCashFlowActive) {
+                        renderCashFlowTable();
+                    } else {
+                        renderTable();
+                    }
+                    renderKPIs();
+
+                    closeLoadModal();
+                } catch (error) {
+                    alert('Error al cargar el presupuesto: ' + error.message);
+                }
+            };
+
+            const handleDeleteProject = async (projectId) => {
+                if (!confirm('¿Estás seguro de eliminar este presupuesto del servidor?')) return;
+
+                try {
+                    await deleteProjectFromDB(projectId);
+                    if (state.currentProjectId === projectId) {
+                        state.currentProjectId = null;
+                        state.currentProjectName = null;
+                        state.currentProjectTimestamp = null;
+                    }
                     await renderSavedProjects();
                 } catch (error) {
                     alert('Error al eliminar: ' + error.message);
